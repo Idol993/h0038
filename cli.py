@@ -1,4 +1,5 @@
 import click
+import numpy as np
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
@@ -25,13 +26,13 @@ def _build_params(spot, strike, rate, vol, days, option_type, dividend_yield, st
     )
 
 
-def _parse_position(value, row_idx: int) -> float:
+def _parse_position(value, csv_row_num: int) -> float:
     if pd.isna(value) or value is None:
-        raise ValueError(f"Row {row_idx + 1}: 'position' is empty or missing")
+        raise ValueError(f"Row {csv_row_num}: 'position' is empty or missing")
     try:
         return float(value)
     except (ValueError, TypeError):
-        raise ValueError(f"Row {row_idx + 1}: 'position' value '{value}' is not a valid number")
+        raise ValueError(f"Row {csv_row_num}: 'position' value '{value}' is not a valid number")
 
 
 def _load_portfolio_csv(input_csv: str) -> pd.DataFrame:
@@ -40,7 +41,7 @@ def _load_portfolio_csv(input_csv: str) -> pd.DataFrame:
     for idx, row in df.iterrows():
         if "position" in df.columns:
             try:
-                _parse_position(row.get("position"), idx)
+                _parse_position(row.get("position"), idx + 2)
             except ValueError as e:
                 console.print(f"[red]Error: {e}[/red]")
                 raise click.Abort()
@@ -379,7 +380,7 @@ def portfolio(input_csv, output, summary_output, model):
             option_type = row.get("type", "call")
             style = row.get("style", "european")
             dividend_yield = row.get("dividend_yield", 0.0)
-            position = _parse_position(row.get("position", 1.0), idx)
+            position = _parse_position(row.get("position", 1.0), idx + 2)
             group = row.get("portfolio", "default")
 
             params = _build_params(
@@ -527,7 +528,7 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
             option_type = row.get("type", "call")
             style = row.get("style", "european")
             dividend_yield = row.get("dividend_yield", 0.0)
-            position = _parse_position(row.get("position", 1.0), idx)
+            position = _parse_position(row.get("position", 1.0), idx + 2)
 
             params = _build_params(
                 spot=row["spot"],
@@ -566,7 +567,11 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
                     port_mv = 0.0
                     port_greeks = {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0, "rho": 0.0}
                     vol_clamped_count = 0
-                    avg_actual_vol_change = 0.0
+
+                    shocked_spots = []
+                    shocked_vols = []
+                    shocked_rates = []
+                    raw_vol_shocks = []
 
                     for pos in positions:
                         p = pos["params"]
@@ -574,6 +579,11 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
                         raw_vol = p.vol + dv
                         shocked_vol = max(raw_vol, 0.0)
                         shocked_rate = max(p.rate + dr, 0.0)
+
+                        shocked_spots.append(shocked_spot)
+                        shocked_vols.append(shocked_vol)
+                        shocked_rates.append(shocked_rate)
+                        raw_vol_shocks.append(raw_vol)
 
                         if raw_vol < 0:
                             vol_clamped_count += 1
@@ -605,10 +615,21 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
                     theta_chg = port_greeks["theta"] - base_greeks["theta"]
                     rho_chg = port_greeks["rho"] - base_greeks["rho"]
 
+                    avg_spot = np.mean(shocked_spots)
+                    min_vol = np.min(shocked_vols)
+                    avg_vol = np.mean(shocked_vols)
+                    max_vol = np.max(shocked_vols)
+                    avg_rate = np.mean(shocked_rates)
+
                     scenario_results.append({
                         "spot_shock": ds,
                         "vol_shock": dv,
                         "rate_shock": dr,
+                        "avg_spot": avg_spot,
+                        "min_vol": min_vol,
+                        "avg_vol": avg_vol,
+                        "max_vol": max_vol,
+                        "avg_rate": avg_rate,
                         "vol_clamped": vol_clamped_count > 0,
                         "vol_clamped_count": vol_clamped_count,
                         "base_mv": base_portfolio_mv,
@@ -653,7 +674,8 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
     summary_table.add_column("Scenario", style="bold", width=10)
     summary_table.add_column("Spot Shock", justify="right")
     summary_table.add_column("Vol Shock", justify="right")
-    summary_table.add_column("Rate Shock", justify="right")
+    summary_table.add_column("Avg Spot", justify="right")
+    summary_table.add_column("Vol Range (min/avg/max)", justify="left")
     summary_table.add_column("P&L", justify="right")
     summary_table.add_column("ΔDelta", justify="right")
     summary_table.add_column("ΔGamma", justify="right")
@@ -671,11 +693,18 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
         color = "green" if val >= 0 else "red"
         return f"[{color}]{val:+.4f}[/{color}]"
 
+    def _fmt_vol_range(row):
+        vol_str = f"{row['min_vol']:.3f}/{row['avg_vol']:.3f}/{row['max_vol']:.3f}"
+        if row["vol_clamped"]:
+            return f"[yellow]{vol_str} ⚠[/yellow]"
+        return vol_str
+
     summary_table.add_row(
         "[red]WORST[/red]",
         f"{worst['spot_shock']:.1%}",
-        f"{worst['vol_shock']:.2f}" + (" ⚠" if worst["vol_clamped"] else ""),
-        f"{worst['rate_shock']:.2f}",
+        f"{worst['vol_shock']:+.2f}",
+        f"{worst['avg_spot']:.2f}",
+        _fmt_vol_range(worst),
         f"[{pnl_worst_color}]{worst['pnl']:+.2f}[/{pnl_worst_color}]",
         _fmt_chg(worst["delta_chg"]),
         _fmt_chg(worst["gamma_chg"]),
@@ -686,8 +715,9 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
     summary_table.add_row(
         "[green]BEST[/green]",
         f"{best['spot_shock']:.1%}",
-        f"{best['vol_shock']:.2f}" + (" ⚠" if best["vol_clamped"] else ""),
-        f"{best['rate_shock']:.2f}",
+        f"{best['vol_shock']:+.2f}",
+        f"{best['avg_spot']:.2f}",
+        _fmt_vol_range(best),
         f"[{pnl_best_color}]{best['pnl']:+.2f}[/{pnl_best_color}]",
         _fmt_chg(best["delta_chg"]),
         _fmt_chg(best["gamma_chg"]),
@@ -701,14 +731,33 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
     clamped_scenarios = scenario_df[scenario_df["vol_clamped"]]
     if len(clamped_scenarios) > 0:
         console.print()
-        console.print(f"[yellow]⚠️  {len(clamped_scenarios)} scenario(s) had volatility clamped to 0 for some positions[/yellow]")
+        clamped_table = Table(
+            title="Volatility Clamped Scenarios",
+            show_header=True,
+            header_style="bold yellow",
+        )
+        clamped_table.add_column("Spot Shock", justify="right")
+        clamped_table.add_column("Vol Shock", justify="right")
+        clamped_table.add_column("Rate Shock", justify="right")
+        clamped_table.add_column("Positions Clamped", justify="right")
+        clamped_table.add_column("Actual Vol Range", justify="left")
+        for _, row in clamped_scenarios.iterrows():
+            clamped_table.add_row(
+                f"{row['spot_shock']:.1%}",
+                f"{row['vol_shock']:+.2f}",
+                f"{row['rate_shock']:+.2f}",
+                str(int(row["vol_clamped_count"])),
+                f"[yellow]{row['min_vol']:.3f}/{row['avg_vol']:.3f}/{row['max_vol']:.3f}[/yellow]",
+            )
+        console.print(clamped_table)
 
     if output:
         scenario_df.to_csv(output, index=False)
         console.print()
         console.print(f"[green]Scenario results saved to {output}[/green]")
         console.print(f"[dim]Total {len(scenario_df)} scenarios calculated[/dim]")
-        console.print(f"[dim]Columns include base value, shocked value, and change (_chg) for all metrics[/dim]")
+        console.print(f"[dim]Columns include: shocks, actual params (avg_spot, min/avg/max vol, avg_rate),[/dim]")
+        console.print(f"[dim]base value, shocked value, and change (_chg) for all metrics[/dim]")
 
 
 if __name__ == "__main__":
