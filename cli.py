@@ -25,6 +25,28 @@ def _build_params(spot, strike, rate, vol, days, option_type, dividend_yield, st
     )
 
 
+def _parse_position(value, row_idx: int) -> float:
+    if pd.isna(value) or value is None:
+        raise ValueError(f"Row {row_idx + 1}: 'position' is empty or missing")
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        raise ValueError(f"Row {row_idx + 1}: 'position' value '{value}' is not a valid number")
+
+
+def _load_portfolio_csv(input_csv: str) -> pd.DataFrame:
+    df = pd.read_csv(input_csv)
+    console.print(f"[cyan]Loaded {len(df)} positions from {input_csv}[/cyan]")
+    for idx, row in df.iterrows():
+        if "position" in df.columns:
+            try:
+                _parse_position(row.get("position"), idx)
+            except ValueError as e:
+                console.print(f"[red]Error: {e}[/red]")
+                raise click.Abort()
+    return df
+
+
 def _print_warnings(warnings):
     if warnings:
         for w in warnings:
@@ -347,8 +369,7 @@ def portfolio(input_csv, output, summary_output, model):
     Expected columns: spot, strike, rate, vol, days, type, style (optional),
     dividend_yield (optional), position (optional, default 1), portfolio (optional)
     """
-    df = pd.read_csv(input_csv)
-    console.print(f"[cyan]Loaded {len(df)} positions from {input_csv}[/cyan]")
+    df = _load_portfolio_csv(input_csv)
 
     results = []
     all_warnings = []
@@ -358,7 +379,7 @@ def portfolio(input_csv, output, summary_output, model):
             option_type = row.get("type", "call")
             style = row.get("style", "european")
             dividend_yield = row.get("dividend_yield", 0.0)
-            position = row.get("position", 1.0)
+            position = _parse_position(row.get("position", 1.0), idx)
             group = row.get("portfolio", "default")
 
             params = _build_params(
@@ -491,8 +512,7 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
     Expected columns: spot, strike, rate, vol, days, type, style (optional),
     dividend_yield (optional), position (optional, default 1), portfolio (optional)
     """
-    df = pd.read_csv(input_csv)
-    console.print(f"[cyan]Loaded {len(df)} positions from {input_csv}[/cyan]")
+    df = _load_portfolio_csv(input_csv)
 
     spot_shock_list = [float(x) for x in spot_shocks.split(",")]
     vol_shock_list = [float(x) for x in vol_shocks.split(",")]
@@ -503,11 +523,11 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
     positions = []
 
     with console.status("[bold green]Calculating base scenario...", spinner="dots"):
-        for _, row in df.iterrows():
+        for idx, row in df.iterrows():
             option_type = row.get("type", "call")
             style = row.get("style", "european")
             dividend_yield = row.get("dividend_yield", 0.0)
-            position = row.get("position", 1.0)
+            position = _parse_position(row.get("position", 1.0), idx)
 
             params = _build_params(
                 spot=row["spot"],
@@ -535,7 +555,6 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
 
     scenario_results = []
     total_scenarios = len(spot_shock_list) * len(vol_shock_list) * len(rate_shock_list)
-    current = 0
 
     with console.status(
         f"[bold green]Running {total_scenarios} scenarios...",
@@ -544,15 +563,20 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
         for ds in spot_shock_list:
             for dv in vol_shock_list:
                 for dr in rate_shock_list:
-                    current += 1
                     port_mv = 0.0
                     port_greeks = {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0, "rho": 0.0}
+                    vol_clamped_count = 0
+                    avg_actual_vol_change = 0.0
 
                     for pos in positions:
                         p = pos["params"]
                         shocked_spot = p.spot * (1 + ds)
-                        shocked_vol = max(p.vol + dv, 0.0)
+                        raw_vol = p.vol + dv
+                        shocked_vol = max(raw_vol, 0.0)
                         shocked_rate = max(p.rate + dr, 0.0)
+
+                        if raw_vol < 0:
+                            vol_clamped_count += 1
 
                         sp = OptionParams(
                             spot=shocked_spot,
@@ -575,18 +599,37 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
                     pnl = port_mv - base_portfolio_mv
                     pnl_pct = (pnl / base_portfolio_mv * 100) if base_portfolio_mv > 0 else 0.0
 
+                    delta_chg = port_greeks["delta"] - base_greeks["delta"]
+                    gamma_chg = port_greeks["gamma"] - base_greeks["gamma"]
+                    vega_chg = port_greeks["vega"] - base_greeks["vega"]
+                    theta_chg = port_greeks["theta"] - base_greeks["theta"]
+                    rho_chg = port_greeks["rho"] - base_greeks["rho"]
+
                     scenario_results.append({
                         "spot_shock": ds,
                         "vol_shock": dv,
                         "rate_shock": dr,
+                        "vol_clamped": vol_clamped_count > 0,
+                        "vol_clamped_count": vol_clamped_count,
+                        "base_mv": base_portfolio_mv,
                         "portfolio_mv": port_mv,
                         "pnl": pnl,
                         "pnl_pct": pnl_pct,
+                        "base_delta": base_greeks["delta"],
                         "delta": port_greeks["delta"],
+                        "delta_chg": delta_chg,
+                        "base_gamma": base_greeks["gamma"],
                         "gamma": port_greeks["gamma"],
+                        "gamma_chg": gamma_chg,
+                        "base_vega": base_greeks["vega"],
                         "vega": port_greeks["vega"],
+                        "vega_chg": vega_chg,
+                        "base_theta": base_greeks["theta"],
                         "theta": port_greeks["theta"],
+                        "theta_chg": theta_chg,
+                        "base_rho": base_greeks["rho"],
                         "rho": port_greeks["rho"],
+                        "rho_chg": rho_chg,
                     })
 
     scenario_df = pd.DataFrame(scenario_results)
@@ -607,12 +650,16 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
     best_idx = scenario_df["pnl"].idxmax()
 
     summary_table = Table(title="Scenario Analysis Summary", show_header=True, header_style="bold yellow")
-    summary_table.add_column("Scenario", style="bold")
+    summary_table.add_column("Scenario", style="bold", width=10)
     summary_table.add_column("Spot Shock", justify="right")
     summary_table.add_column("Vol Shock", justify="right")
     summary_table.add_column("Rate Shock", justify="right")
     summary_table.add_column("P&L", justify="right")
-    summary_table.add_column("P&L %", justify="right")
+    summary_table.add_column("ΔDelta", justify="right")
+    summary_table.add_column("ΔGamma", justify="right")
+    summary_table.add_column("ΔVega", justify="right", style="yellow")
+    summary_table.add_column("ΔTheta", justify="right", style="yellow")
+    summary_table.add_column("ΔRho", justify="right", style="blue")
 
     worst = scenario_df.loc[worst_idx]
     best = scenario_df.loc[best_idx]
@@ -620,29 +667,48 @@ def scenario(input_csv, spot_shocks, vol_shocks, rate_shocks, output, model):
     pnl_worst_color = "red" if worst["pnl"] < 0 else "green"
     pnl_best_color = "red" if best["pnl"] < 0 else "green"
 
+    def _fmt_chg(val):
+        color = "green" if val >= 0 else "red"
+        return f"[{color}]{val:+.4f}[/{color}]"
+
     summary_table.add_row(
         "[red]WORST[/red]",
         f"{worst['spot_shock']:.1%}",
-        f"{worst['vol_shock']:.2f}",
+        f"{worst['vol_shock']:.2f}" + (" ⚠" if worst["vol_clamped"] else ""),
         f"{worst['rate_shock']:.2f}",
-        f"[{pnl_worst_color}]{worst['pnl']:.2f}[/{pnl_worst_color}]",
-        f"[{pnl_worst_color}]{worst['pnl_pct']:.2f}%[/{pnl_worst_color}]",
+        f"[{pnl_worst_color}]{worst['pnl']:+.2f}[/{pnl_worst_color}]",
+        _fmt_chg(worst["delta_chg"]),
+        _fmt_chg(worst["gamma_chg"]),
+        _fmt_chg(worst["vega_chg"]),
+        _fmt_chg(worst["theta_chg"]),
+        _fmt_chg(worst["rho_chg"]),
     )
     summary_table.add_row(
         "[green]BEST[/green]",
         f"{best['spot_shock']:.1%}",
-        f"{best['vol_shock']:.2f}",
+        f"{best['vol_shock']:.2f}" + (" ⚠" if best["vol_clamped"] else ""),
         f"{best['rate_shock']:.2f}",
-        f"[{pnl_best_color}]{best['pnl']:.2f}[/{pnl_best_color}]",
-        f"[{pnl_best_color}]{best['pnl_pct']:.2f}%[/{pnl_best_color}]",
+        f"[{pnl_best_color}]{best['pnl']:+.2f}[/{pnl_best_color}]",
+        _fmt_chg(best["delta_chg"]),
+        _fmt_chg(best["gamma_chg"]),
+        _fmt_chg(best["vega_chg"]),
+        _fmt_chg(best["theta_chg"]),
+        _fmt_chg(best["rho_chg"]),
     )
 
     console.print(summary_table)
 
+    clamped_scenarios = scenario_df[scenario_df["vol_clamped"]]
+    if len(clamped_scenarios) > 0:
+        console.print()
+        console.print(f"[yellow]⚠️  {len(clamped_scenarios)} scenario(s) had volatility clamped to 0 for some positions[/yellow]")
+
     if output:
         scenario_df.to_csv(output, index=False)
+        console.print()
         console.print(f"[green]Scenario results saved to {output}[/green]")
         console.print(f"[dim]Total {len(scenario_df)} scenarios calculated[/dim]")
+        console.print(f"[dim]Columns include base value, shocked value, and change (_chg) for all metrics[/dim]")
 
 
 if __name__ == "__main__":
