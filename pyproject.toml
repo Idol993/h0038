@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "option-pricer"
+version = "0.1.0"
+description = "European/American option pricing and Greeks calculation CLI tool"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "rich>=13.0",
+    "click>=8.1",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+option-pricer = "cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]

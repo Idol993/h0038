@@ -1,0 +1,6 @@
+spot,strike,rate,vol,days,type,style,dividend_yield
+100,105,0.05,0.25,30,call,european,0.0
+100,100,0.05,0.25,30,put,european,0.0
+100,95,0.05,0.20,60,call,american,0.02
+100,110,0.05,0.30,90,put,american,0.0
+90,100,0.04,0.35,180,call,european,0.01
