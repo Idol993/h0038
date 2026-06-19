@@ -1,0 +1,7 @@
+spot,strike,rate,vol,days,type,style,dividend_yield,position,portfolio
+100,105,0.05,0.25,30,call,european,0.0,10,equity_book
+100,100,0.05,0.25,30,put,european,0.0,-5,equity_book
+100,95,0.05,0.20,60,call,american,0.02,20,equity_book
+100,110,0.05,0.30,90,put,american,0.0,-15,vol_book
+90,100,0.04,0.35,180,call,european,0.01,8,vol_book
+100,98,0.05,0.22,45,put,european,0.0,12,income_book

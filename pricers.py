@@ -36,15 +36,25 @@ class OptionParams(BaseModel):
         return self.days / 365.0
 
 
+def _zero_vol_price(params: OptionParams) -> float:
+    S, K, r, T = params.spot, params.strike, params.rate, params.T
+    q = params.dividend_yield
+    is_call = params.option_type == "call"
+
+    F = S * math.exp((r - q) * T)
+    if is_call:
+        payoff = max(F - K, 0.0)
+    else:
+        payoff = max(K - F, 0.0)
+    return payoff * math.exp(-r * T)
+
+
 def black_scholes_price(params: OptionParams) -> float:
     S, K, r, sigma, T = params.spot, params.strike, params.rate, params.vol, params.T
     q = params.dividend_yield
 
     if sigma == 0 or T == 0:
-        if params.option_type == "call":
-            return max(S - K, 0.0)
-        else:
-            return max(K - S, 0.0)
+        return _zero_vol_price(params)
 
     d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
@@ -64,16 +74,20 @@ def binomial_price(params: OptionParams, n_steps: int = 500) -> float:
     is_call = params.option_type == "call"
 
     if sigma == 0 or T == 0:
-        if is_call:
-            return max(S - K, 0.0)
-        else:
-            return max(K - S, 0.0)
+        return _zero_vol_price(params)
 
     dt = T / n_steps
+    if dt < 1e-6:
+        n_steps = max(10, int(T * 365 * 24))
+        dt = T / n_steps
+
     u = math.exp(sigma * math.sqrt(dt))
     d = 1.0 / u
     a = math.exp((r - q) * dt)
     p = (a - d) / (u - d)
+
+    if p < 0 or p > 1:
+        p = max(0.0, min(1.0, p))
 
     stock_prices = np.zeros(n_steps + 1)
     option_values = np.zeros(n_steps + 1)
@@ -107,8 +121,7 @@ def monte_carlo_price(
     is_call = params.option_type == "call"
 
     if sigma == 0 or T == 0:
-        payoff = max(S - K, 0.0) if is_call else max(K - S, 0.0)
-        price = math.exp(-r * T) * payoff
+        price = _zero_vol_price(params)
         return price, (price, price)
 
     rng = np.random.default_rng(seed)
@@ -213,13 +226,22 @@ def price_option(params: OptionParams, model: str = "bs") -> dict:
         "price": None,
         "ci_lower": None,
         "ci_upper": None,
+        "warnings": [],
     }
 
-    if model == "bs":
+    effective_model = model
+    if params.style == "american" and model in ("bs", "monte-carlo"):
+        effective_model = "binomial"
+        result["model"] = "binomial"
+        result["warnings"].append(
+            f"American options not supported by {model.upper()} model, automatically switched to BINOMIAL"
+        )
+
+    if effective_model == "bs":
         result["price"] = black_scholes_price(params)
-    elif model == "binomial":
+    elif effective_model == "binomial":
         result["price"] = binomial_price(params)
-    elif model == "monte-carlo":
+    elif effective_model == "monte-carlo":
         price, ci = monte_carlo_price(params)
         result["price"] = price
         result["ci_lower"] = ci[0]

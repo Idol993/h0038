@@ -52,7 +52,19 @@ def bs_greeks(params: OptionParams) -> dict:
 
 def binomial_greeks(params: OptionParams, n_steps: int = 500) -> dict:
     S = params.spot
-    ds = S * 0.01
+    ds = max(S * 0.01, 0.01)
+
+    T = params.T
+    if T < 1e-6:
+        ds = max(S * 0.005, 0.01)
+
+    dv = 0.01
+    if params.vol < 0.01:
+        dv = max(params.vol * 0.5 if params.vol > 0 else 0.001, 0.001)
+
+    effective_n = n_steps
+    if T < 2 / 365:
+        effective_n = max(50, int(T * 365 * 10))
 
     params_up = OptionParams(
         spot=S + ds,
@@ -75,19 +87,20 @@ def binomial_greeks(params: OptionParams, n_steps: int = 500) -> dict:
         style=params.style,
     )
 
-    p_up = binomial_price(params_up, n_steps)
-    p_down = binomial_price(params_down, n_steps)
-    p_mid = binomial_price(params, n_steps)
+    p_up = binomial_price(params_up, effective_n)
+    p_down = binomial_price(params_down, effective_n)
+    p_mid = binomial_price(params, effective_n)
 
     delta = (p_up - p_down) / (2 * ds)
     gamma = (p_up - 2 * p_mid + p_down) / (ds**2)
 
-    dv = 0.01
+    vol_up = max(params.vol + dv, 0.001)
+    vol_down = max(params.vol - dv, 0.001)
     params_vol_up = OptionParams(
         spot=S,
         strike=params.strike,
         rate=params.rate,
-        vol=params.vol + dv,
+        vol=vol_up,
         days=params.days,
         option_type=params.option_type,
         dividend_yield=params.dividend_yield,
@@ -97,28 +110,29 @@ def binomial_greeks(params: OptionParams, n_steps: int = 500) -> dict:
         spot=S,
         strike=params.strike,
         rate=params.rate,
-        vol=params.vol - dv,
+        vol=vol_down,
         days=params.days,
         option_type=params.option_type,
         dividend_yield=params.dividend_yield,
         style=params.style,
     )
-    vega = (binomial_price(params_vol_up, n_steps) - binomial_price(params_vol_down, n_steps)) / (2 * dv)
+    vega = (binomial_price(params_vol_up, effective_n) - binomial_price(params_vol_down, effective_n)) / (2 * dv)
 
-    dt_days = 1
+    dt_days = max(1, params.days * 0.01 if params.days >= 1 else 0.1)
+    effective_theta_days = max(params.days - dt_days, 0.01)
     params_theta = OptionParams(
         spot=S,
         strike=params.strike,
         rate=params.rate,
         vol=params.vol,
-        days=params.days - dt_days,
+        days=effective_theta_days,
         option_type=params.option_type,
         dividend_yield=params.dividend_yield,
         style=params.style,
     )
-    theta = binomial_price(params_theta, n_steps) - p_mid
+    theta = (binomial_price(params_theta, effective_n) - p_mid) / dt_days
 
-    dr = 0.001
+    dr = max(0.001, params.rate * 0.1 if params.rate > 0 else 0.001)
     params_r_up = OptionParams(
         spot=S,
         strike=params.strike,
@@ -132,14 +146,14 @@ def binomial_greeks(params: OptionParams, n_steps: int = 500) -> dict:
     params_r_down = OptionParams(
         spot=S,
         strike=params.strike,
-        rate=params.rate - dr,
+        rate=max(params.rate - dr, 0),
         vol=params.vol,
         days=params.days,
         option_type=params.option_type,
         dividend_yield=params.dividend_yield,
         style=params.style,
     )
-    rho = (binomial_price(params_r_up, n_steps) - binomial_price(params_r_down, n_steps)) / (2 * dr)
+    rho = (binomial_price(params_r_up, effective_n) - binomial_price(params_r_down, effective_n)) / (2 * dr)
 
     return {
         "delta": delta,
@@ -151,12 +165,28 @@ def binomial_greeks(params: OptionParams, n_steps: int = 500) -> dict:
 
 
 def calculate_greeks(params: OptionParams, model: str = "bs") -> dict:
-    if model == "bs":
-        return bs_greeks(params)
-    elif model == "binomial":
-        return binomial_greeks(params)
+    result = {
+        "model": model,
+        "warnings": [],
+    }
+
+    effective_model = model
+    if params.style == "american" and model == "bs":
+        effective_model = "binomial"
+        result["model"] = "binomial"
+        result["warnings"].append(
+            f"American options not supported by BS model for Greeks, automatically switched to BINOMIAL"
+        )
+
+    if effective_model == "bs":
+        greeks = bs_greeks(params)
+    elif effective_model == "binomial":
+        greeks = binomial_greeks(params)
     else:
         raise ValueError(f"Greeks not supported for model: {model}")
+
+    result.update(greeks)
+    return result
 
 
 def greeks_spot_range(
